@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SprintFlow - Personal Jira</title>
+    
+    <!-- Подключаем Tailwind CSS для стилей -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Подключаем Babel для обработки JSX прямо в браузере -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- Настройка карты импортов, чтобы браузер понимал, откуда брать библиотеки -->
+    <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.2.0",
+        "react-dom": "https://esm.sh/react-dom@18.2.0",
+        "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
+        "lucide-react": "https://esm.sh/lucide-react@0.292.0",
+        "recharts": "https://esm.sh/recharts@2.12.2?external=react,react-dom"
+      }
+    }
+    </script>
+
+    <style>
+        /* Дополнительные стили для скроллбара */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 3px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background-color: #94a3b8;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900 font-sans">
+    <div id="root"></div>
+
+    <!-- Основной код приложения -->
+    <script type="text/babel" data-type="module">
+        import React, { useState, useEffect, useRef, useMemo } from 'react';
+        import { createRoot } from 'react-dom/client';
+        import { 
+          Calendar, Layout, BarChart2, Plus, X, Link as LinkIcon, 
+          Clock, CheckCircle2, Circle, Timer, Play, Pause, RotateCcw, 
+          Coffee, Zap, Trash2, Settings, GripHorizontal, BellRing, 
+          Loader2, Repeat, CalendarDays, Rocket, Save, Database, 
+          Download, Upload, Archive, AlertTriangle
+        } from 'lucide-react';
+        import { 
+          BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, 
+          Legend, ResponsiveContainer, LineChart, Line 
+        } from 'recharts';
+
+        // --- DATABASE LAYER (IndexedDB Wrapper) ---
+
+        const DB_NAME = 'SprintFlowDB';
+        const DB_VERSION = 1;
+        const STORE_TASKS = 'tasks';
+        const STORE_ARCHIVES = 'archives';
+
+        const dbParams = {
+          db: null
+        };
+
+        const initDB = () => {
+          return new Promise((resolve, reject) => {
+            const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+            request.onupgradeneeded = (event) => {
+              const db = event.target.result;
+              if (!db.objectStoreNames.contains(STORE_TASKS)) {
+                db.createObjectStore(STORE_TASKS, { keyPath: 'id' });
+              }
+              if (!db.objectStoreNames.contains(STORE_ARCHIVES)) {
+                db.createObjectStore(STORE_ARCHIVES, { keyPath: 'id' });
+              }
+            };
+
+            request.onsuccess = (event) => {
+              dbParams.db = event.target.result;
+              resolve(dbParams.db);
+            };
+
+            request.onerror = (event) => {
+              reject('DB Error: ' + event.target.error);
+            };
+          });
+        };
+
+        const dbAPI = {
+          getAllTasks: () => {
+            return new Promise((resolve) => {
+              if (!dbParams.db) return resolve([]);
+              const transaction = dbParams.db.transaction([STORE_TASKS], 'readonly');
+              const store = transaction.objectStore(STORE_TASKS);
+              const request = store.getAll();
+              request.onsuccess = () => resolve(request.result || []);
+            });
+          },
+          saveTask: (task) => {
+            return new Promise((resolve) => {
+              if (!dbParams.db) return resolve();
+              const transaction = dbParams.db.transaction([STORE_TASKS], 'readwrite');
+              const store = transaction.objectStore(STORE_TASKS);
+              store.put(task);
+              transaction.oncomplete = () => resolve();
+            });
+          },
+          deleteTask: (id) => {
+            return new Promise((resolve) => {
+              if (!dbParams.db) return resolve();
+              const transaction = dbParams.db.transaction([STORE_TASKS], 'readwrite');
+              const store = transaction.objectStore(STORE_TASKS);
+              store.delete(id);
+              transaction.oncomplete = () => resolve();
+            });
+          },
+          saveArchive: (archive) => {
+            return new Promise((resolve) => {
+              if (!dbParams.db) return resolve();
+              const transaction = dbParams.db.transaction([STORE_ARCHIVES], 'readwrite');
+              const store = transaction.objectStore(STORE_ARCHIVES);
+              store.put(archive);
+              transaction.oncomplete = () => resolve();
+            });
+          },
+          getArchives: () => {
+            return new Promise((resolve) => {
+              if (!dbParams.db) return resolve([]);
+              const transaction = dbParams.db.transaction([STORE_ARCHIVES], 'readonly');
+              const store = transaction.objectStore(STORE_ARCHIVES);
+              const request = store.getAll();
+              request.onsuccess = () => resolve(request.result || []);
+            });
+          },
+          clearAllTasks: () => {
+              return new Promise((resolve) => {
+                if (!dbParams.db) return resolve();
+                const transaction = dbParams.db.transaction([STORE_TASKS], 'readwrite');
+                const store = transaction.objectStore(STORE_TASKS);
+                store.clear();
+                transaction.oncomplete = () => resolve();
+              });
+          }
+        };
+
+        // --- КОМПОНЕНТЫ UI ---
+
+        const Button = ({ children, onClick, variant = 'primary', className = '', icon: Icon, disabled = false }) => {
+          const baseStyle = "flex items-center justify-center px-4 py-2 rounded-lg font-medium transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed";
+          const variants = {
+            primary: "bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500 shadow-sm",
+            secondary: "bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 focus:ring-slate-500 shadow-sm",
+            ghost: "text-slate-600 hover:bg-slate-100 hover:text-slate-900",
+            danger: "bg-red-50 text-red-600 hover:bg-red-100",
+            success: "bg-emerald-600 text-white hover:bg-emerald-700 focus:ring-emerald-500",
+          };
+          return (
+            <button onClick={onClick} disabled={disabled} className={`${baseStyle} ${variants[variant]} ${className}`}>
+              {Icon && <Icon size={18} className="mr-2" />}
+              {children}
+            </button>
+          );
+        };
+
+        const Card = ({ children, className = '' }) => (
+          <div className={`bg-white rounded-xl border border-slate-200 shadow-sm ${className}`}>
+            {children}
+          </div>
+        );
+
+        const ProgressBar = ({ current, total, colorClass = "bg-blue-500" }) => {
+          const percent = Math.min(100, Math.max(0, ((total - current) / total) * 100));
+          return (
+            <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden mt-2">
+              <div className={`h-full ${colorClass} transition-all duration-500`} style={{ width: `${percent}%` }} />
+            </div>
+          );
+        };
+
+        const formatDurationDetailed = (minutes) => {
+          const m = Math.floor(minutes);
+          const s = Math.floor((minutes - m) * 60);
+          if (s > 0 || m === 0) return `${m}м ${String(s).padStart(2, '0')}с`;
+          return `${m}м`;
+        };
+
+        const isToday = (dateString) => {
+          if (!dateString) return false;
+          const date = new Date(dateString);
+          const today = new Date();
+          return date.getDate() === today.getDate() && date.getMonth() === today.getMonth() && date.getFullYear() === today.getFullYear();
+        };
+
+        // --- ROCKET RUNNER ---
+        const RocketRunner = ({ isRunning }) => {
+          return (
+            <div className="w-full h-32 bg-slate-900 border-t border-slate-800 relative overflow-hidden mt-auto group">
+              {/* Звезды */}
+              <div className={`absolute inset-0 ${isRunning ? 'animate-space-scroll' : ''} opacity-80`}>
+                 {[...Array(20)].map((_, i) => (
+                     <div key={i} className="absolute bg-white rounded-full" 
+                          style={{
+                              top: `${Math.random() * 100}%`,
+                              left: `${Math.random() * 100}%`,
+                              width: `${Math.random() * 3}px`,
+                              height: `${Math.random() * 3}px`,
+                              opacity: Math.random()
+                          }} 
+                     />
+                 ))}
+              </div>
+              
+              {/* Ракета */}
+              <div className={`absolute top-1/2 left-10 w-12 h-12 -mt-6 transition-all duration-500 ${isRunning ? 'animate-rocket-fly' : 'opacity-50 grayscale'}`}>
+                 <div className="relative w-full h-full">
+                    {isRunning && (
+                        <div className="absolute top-1/2 -left-4 w-6 h-4 -mt-2 animate-pulse">
+                            <div className="w-full h-full bg-orange-500 rounded-l-full blur-[2px]" />
+                            <div className="absolute top-1 left-2 w-3 h-2 bg-yellow-300 rounded-l-full blur-[1px]" />
+                        </div>
+                    )}
+                    <Rocket className="w-full h-full text-white fill-slate-200 transform rotate-45 drop-shadow-lg" strokeWidth={1.5} />
+                 </div>
+              </div>
+
+              <div className="absolute bottom-2 right-2 text-[10px] font-mono text-slate-500">
+                  {isRunning ? "SYSTEM: PROPULSION ACTIVE" : "SYSTEM: IDLE"}
+              </div>
+
+              <style>{`
+                @keyframes space-scroll {
+                  from { transform: translateX(0); }
+                  to { transform: translateX(-50px); }
+                }
+                .animate-space-scroll {
+                    animation: space-scroll 1s linear infinite;
+                }
+                @keyframes rocket-fly {
+                    0%, 100% { transform: translateY(0) rotate(45deg); }
+                    50% { transform: translateY(-5px) rotate(45deg); }
+                }
+                .animate-rocket-fly {
+                    animation: rocket-fly 2s ease-in-out infinite;
+                }
+                @keyframes pulse-ring {
+                  0% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.4); }
+                  70% { box-shadow: 0 0 0 6px rgba(99, 102, 241, 0); }
+                  100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0); }
+                }
+                .animate-pulse-ring {
+                  animation: pulse-ring 2s infinite;
+                }
+              `}</style>
+            </div>
+          );
+        };
+
+        // --- Основное приложение ---
+
+        export default function App() {
+          const [activeTab, setActiveTab] = useState('board'); 
+          const [tasks, setTasks] = useState([]);
+          const [archives, setArchives] = useState([]);
+          const [isDataLoaded, setIsDataLoaded] = useState(false);
+
+          useEffect(() => {
+            initDB().then(() => {
+                loadData();
+            }).catch(err => console.error(err));
+          }, []);
+
+          const loadData = async () => {
+              const loadedTasks = await dbAPI.getAllTasks();
+              const loadedArchives = await dbAPI.getArchives();
+              setTasks(loadedTasks.length > 0 ? loadedTasks : []);
+              setArchives(loadedArchives);
+              setIsDataLoaded(true);
+          };
+
+          const saveTaskToDB = async (task) => {
+              await dbAPI.saveTask(task);
+              setTasks(prev => {
+                  const exists = prev.find(t => t.id === task.id);
+                  if (exists) return prev.map(t => t.id === task.id ? task : t);
+                  return [...prev, task];
+              });
+          };
+          
+          const removeTaskFromDB = async (id) => {
+              await dbAPI.deleteTask(id);
+              setTasks(prev => prev.filter(t => t.id !== id));
+          };
+
+          const [isModalOpen, setIsModalOpen] = useState(false);
+          const [isDataModalOpen, setIsDataModalOpen] = useState(false);
+          const [editingTask, setEditingTask] = useState(null);
+
+          // --- Timer State ---
+          const [timerSettings, setTimerSettings] = useState({ focus: 25, short: 5, long: 15 });
+          const [timeLeft, setTimeLeft] = useState(timerSettings.focus * 60);
+          const [isTimerActive, setIsTimerActive] = useState(false);
+          const [timerMode, setTimerMode] = useState('focus');
+          const [sessionQueueIds, setSessionQueueIds] = useState([]);
+          const [notification, setNotification] = useState(null);
+
+          useEffect(() => {
+            let interval = null;
+            if (isTimerActive && timeLeft > 0) {
+              interval = setInterval(() => {
+                setTimeLeft((prev) => prev - 1);
+
+                if (timerMode === 'focus') {
+                   setTasks(currentTasks => {
+                        const queueTasks = sessionQueueIds.map(id => currentTasks.find(t => t.id === id)).filter(Boolean);
+                        const activeTaskIndex = queueTasks.findIndex(t => t.duration > 0);
+                        
+                        if (activeTaskIndex !== -1) {
+                          const activeTask = queueTasks[activeTaskIndex];
+                          const newDuration = Math.max(0, activeTask.duration - (1/60));
+                          const updatedTask = { ...activeTask, duration: newDuration };
+                          
+                          if (Math.floor(activeTask.duration) !== Math.floor(newDuration)) {
+                              dbAPI.saveTask(updatedTask);
+                          }
+
+                          return currentTasks.map(t => t.id === activeTask.id ? updatedTask : t);
+                        } else if (sessionQueueIds.length > 0) {
+                          setIsTimerActive(false);
+                          setNotification("Все задачи в сессии завершены! 🚀");
+                          return currentTasks;
+                        }
+                        return currentTasks;
+                   });
+                }
+              }, 1000);
+            } else if (timeLeft === 0) {
+              setIsTimerActive(false);
+              setNotification("Время вышло!");
+            }
+            return () => clearInterval(interval);
+          }, [isTimerActive, timeLeft, timerMode, sessionQueueIds]);
+
+          const addTask = (task) => {
+            const newTask = { 
+              ...task, 
+              id: Math.random().toString(36).substr(2, 9), 
+              sprint: 'current',
+              totalDuration: task.duration 
+            };
+            saveTaskToDB(newTask);
+            setIsModalOpen(false);
+          };
+
+          const updateTaskLocal = (updatedTask) => {
+            saveTaskToDB(updatedTask);
+            setIsModalOpen(false);
+            setEditingTask(null);
+          };
+
+          const deleteTaskLocal = (id) => {
+            removeTaskFromDB(id);
+            setSessionQueueIds(prev => prev.filter(qId => qId !== id));
+            setIsModalOpen(false);
+          };
+
+          const moveTaskStatus = (id, newStatus) => {
+            const task = tasks.find(t => t.id === id);
+            if (task) {
+                saveTaskToDB({ ...task, status: newStatus });
+            }
+          };
+
+          const openModal = (task = null) => {
+            setEditingTask(task);
+            setIsModalOpen(true);
+          };
+
+          const timerControls = {
+            settings: timerSettings, setSettings: setTimerSettings,
+            timeLeft, setTimeLeft, isActive: isTimerActive, setIsActive: setIsTimerActive,
+            mode: timerMode, setMode: setTimerMode,
+            queueIds: sessionQueueIds, setQueueIds: setSessionQueueIds
+          };
+
+          if (!isDataLoaded) {
+              return <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-500">
+                  <Loader2 className="animate-spin mr-2" /> Загрузка базы данных...
+              </div>;
+          }
+
+          return (
+            <div className="min-h-screen bg-slate-50 text-slate-900 font-sans relative">
+              {notification && (
+                <div className="fixed top-20 right-4 z-50 bg-slate-800 text-white px-6 py-4 rounded-xl shadow-2xl animate-in slide-in-from-right fade-in flex items-center gap-3 max-w-sm">
+                   <BellRing className="text-amber-400" />
+                   <p className="font-medium text-sm flex-1">{notification}</p>
+                   <button onClick={() => setNotification(null)} className="text-slate-400 hover:text-white"><X size={18} /></button>
+                </div>
+              )}
+
+              {/* Header */}
+              <header className="bg-white border-b border-slate-200 sticky top-0 z-40">
+                <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold shadow-sm transform rotate-45">
+                       <Rocket size={18} className="transform -rotate-45" />
+                    </div>
+                    <h1 className="text-xl font-bold text-slate-800 tracking-tight hidden sm:block">SprintFlow</h1>
+                    {isTimerActive && (
+                      <div className="ml-4 px-3 py-1 bg-indigo-50 text-indigo-600 rounded-full text-xs font-mono font-bold animate-pulse flex items-center gap-2 border border-indigo-100">
+                        <div className="w-2 h-2 bg-indigo-500 rounded-full" />
+                        {Math.floor(timeLeft / 60)}:{String(timeLeft % 60).padStart(2, '0')}
+                      </div>
+                    )}
+                  </div>
+                  
+                  <nav className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg">
+                    {[
+                      { id: 'board', icon: Layout, label: 'Доска' },
+                      { id: 'calendar', icon: Calendar, label: 'Календарь' },
+                      { id: 'checkout', icon: Timer, label: 'Checkout' },
+                      { id: 'analytics', icon: BarChart2, label: 'Аналитика' },
+                    ].map((tab) => (
+                      <button
+                        key={tab.id}
+                        onClick={() => setActiveTab(tab.id)}
+                        className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+                          activeTab === tab.id 
+                            ? 'bg-white text-blue-600 shadow-sm' 
+                            : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'
+                        }`}
+                      >
+                        <tab.icon size={16} />
+                        <span className="hidden md:inline">{tab.label}</span>
+                      </button>
+                    ))}
+                  </nav>
+
+                  <div className="flex gap-2">
+                    <button onClick={() => setIsDataModalOpen(true)} className="p-2 text-slate-500 hover:bg-slate-100 rounded-lg" title="Управление данными">
+                        <Database size={20} />
+                    </button>
+                    <Button onClick={() => openModal()} icon={Plus} variant="primary" className="hidden sm:flex">
+                        Задача
+                    </Button>
+                  </div>
+                </div>
+              </header>
+
+              {/* Main Content */}
+              <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                {activeTab === 'board' && <BoardView tasks={tasks} onMoveStatus={moveTaskStatus} onEdit={openModal} />}
+                {activeTab === 'calendar' && <CalendarView tasks={tasks} onUpdateTask={saveTaskToDB} onEdit={openModal} />}
+                {activeTab === 'checkout' && <CheckoutView tasks={tasks} controls={timerControls} onUpdateTask={saveTaskToDB} />}
+                {activeTab === 'analytics' && <AnalyticsView tasks={tasks} archives={archives} />}
+              </main>
+
+              {/* Modals */}
+              {isModalOpen && (
+                <TaskModal task={editingTask} onSave={editingTask ? updateTaskLocal : addTask} onClose={() => setIsModalOpen(false)} onDelete={deleteTaskLocal} />
+              )}
+              
+              {isDataModalOpen && (
+                  <DataManagementModal 
+                    onClose={() => setIsDataModalOpen(false)} 
+                    tasks={tasks} 
+                    archives={archives}
+                    onReload={loadData}
+                  />
+              )}
+            </div>
+          );
+        }
+
+        function DataManagementModal({ onClose, tasks, archives, onReload }) {
+            const handleExport = () => {
+                const data = {
+                    tasks,
+                    archives,
+                    timestamp: new Date().toISOString(),
+                    version: 1
+                };
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `sprintflow-backup-${new Date().toISOString().slice(0,10)}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            };
+
+            const handleImport = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    try {
+                        const data = JSON.parse(event.target.result);
+                        if (data.tasks) {
+                            await dbAPI.clearAllTasks();
+                            for (const t of data.tasks) await dbAPI.saveTask(t);
+                        }
+                        if (data.archives) {
+                            for (const a of data.archives) await dbAPI.saveArchive(a);
+                        }
+                        onReload();
+                        alert('Данные успешно импортированы!');
+                        onClose();
+                    } catch (err) {
+                        alert('Ошибка при чтении файла');
+                    }
+                };
+                reader.readAsText(file);
+            };
+
+            const handleArchive = async () => {
+                if (!window.confirm('Это действие удалит выполненные задачи, созданные более 7 дней назад, но сохранит статистику по ним. Продолжить?')) return;
+                
+                const now = new Date();
+                const cutoffDate = new Date(now.setDate(now.getDate() - 7));
+                
+                const tasksToArchive = tasks.filter(t => 
+                    t.status === 'done' && 
+                    t.startTime && 
+                    new Date(t.startTime) < cutoffDate && 
+                    !t.isDaily 
+                );
+
+                if (tasksToArchive.length === 0) {
+                    alert('Нет задач для архивации (старше 7 дней и выполненных)');
+                    return;
+                }
+
+                const archiveEntry = {
+                    id: `archive-${Date.now()}`,
+                    date: new Date().toISOString(),
+                    count: tasksToArchive.length,
+                    totalDuration: tasksToArchive.reduce((acc, t) => acc + (t.totalDuration || 0), 0),
+                    tasksTitlePreview: tasksToArchive.slice(0, 5).map(t => t.title)
+                };
+
+                await dbAPI.saveArchive(archiveEntry);
+                for (const t of tasksToArchive) {
+                    await dbAPI.deleteTask(t.id);
+                }
+                
+                onReload();
+                alert(`Архивировано ${tasksToArchive.length} задач.`);
+            };
+
+            return (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+                    <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 animate-in zoom-in duration-200">
+                        <div className="flex justify-between items-center mb-6 border-b border-slate-100 pb-4">
+                            <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                                <Database className="text-blue-600" /> Управление данными
+                            </h2>
+                            <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><X size={24} /></button>
+                        </div>
+                        
+                        <div className="space-y-6">
+                            <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                <h3 className="font-semibold text-slate-700 mb-2 flex items-center gap-2"><Save size={16}/> Резервное копирование</h3>
+                                <p className="text-sm text-slate-500 mb-4">Скачайте JSON файл со всеми вашими задачами и историей.</p>
+                                <div className="flex gap-3">
+                                    <Button variant="secondary" onClick={handleExport} className="w-full">
+                                        <Download size={16} className="mr-2" /> Экспорт
+                                    </Button>
+                                    <label className="w-full">
+                                        <div className="flex items-center justify-center px-4 py-2 rounded-lg font-medium transition-all bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 cursor-pointer shadow-sm">
+                                            <Upload size={16} className="mr-2" /> Импорт
+                                        </div>
+                                        <input type="file" accept=".json" onChange={handleImport} className="hidden" />
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
+                                <h3 className="font-semibold text-amber-800 mb-2 flex items-center gap-2"><Archive size={16}/> Оптимизация базы</h3>
+                                <p className="text-sm text-amber-700 mb-4">
+                                    Сжать старые выполненные задачи (старше 7 дней). 
+                                    Задачи удалятся из списка, но статистика сохранится в архиве.
+                                </p>
+                                <Button variant="ghost" onClick={handleArchive} className="w-full bg-amber-100 text-amber-800 hover:bg-amber-200 border-transparent">
+                                    Сжать и архивировать
+                                </Button>
+                            </div>
+
+                            <div className="text-xs text-center text-slate-400">
+                                Данные хранятся локально в IndexedDB вашего браузера.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        }
+
+        // --- Views: Checkout, Board, Calendar, Analytics ---
+
+        function CheckoutView({ tasks, controls, onUpdateTask }) {
+          const { settings, setSettings, timeLeft, setTimeLeft, isActive, setIsActive, mode, setMode, queueIds, setQueueIds } = controls;
+          const [showSettings, setShowSettings] = useState(false);
+
+          useEffect(() => {
+            if (!isActive) {
+              if (mode === 'focus') setTimeLeft(settings.focus * 60);
+              else if (mode === 'short') setTimeLeft(settings.short * 60);
+              else setTimeLeft(settings.long * 60);
+            }
+          }, [settings, mode, isActive]);
+
+          const toggleTimer = () => setIsActive(!isActive);
+          const resetTimer = () => { setIsActive(false); setTimeLeft(settings[mode] * 60); };
+
+          const addToSession = (task) => { if (!queueIds.includes(task.id)) setQueueIds([...queueIds, task.id]); };
+          const removeFromSession = (taskId) => setQueueIds(queueIds.filter(id => id !== taskId));
+
+          const handleDragStartQueue = (e, index) => { e.dataTransfer.setData('sourceIndex', index); e.dataTransfer.setData('type', 'reorder'); };
+          const handleDropToSession = (e) => {
+            e.preventDefault();
+            const type = e.dataTransfer.getData('type');
+            const taskId = e.dataTransfer.getData('taskId');
+            if (type !== 'reorder' && taskId && !queueIds.includes(taskId)) addToSession({ id: taskId });
+          };
+          const handleDropOnItem = (e, targetIndex) => {
+            e.stopPropagation();
+            const type = e.dataTransfer.getData('type');
+            if (type === 'reorder') {
+                const sourceIndex = parseInt(e.dataTransfer.getData('sourceIndex'));
+                if (sourceIndex === targetIndex) return;
+                const newQueue = [...queueIds];
+                const [moved] = newQueue.splice(sourceIndex, 1);
+                newQueue.splice(targetIndex, 0, moved);
+                setQueueIds(newQueue);
+            } else {
+                const taskId = e.dataTransfer.getData('taskId');
+                if (taskId && !queueIds.includes(taskId)) {
+                    const newQueue = [...queueIds];
+                    newQueue.splice(targetIndex, 0, taskId);
+                    setQueueIds(newQueue);
+                }
+            }
+          };
+
+          const sessionTasks = queueIds.map(id => tasks.find(t => t.id === id)).filter(Boolean);
+          const activeQueueTask = sessionTasks.find(t => t.duration > 0);
+          
+          const dailyTasks = tasks.filter(t => t.isDaily && t.status !== 'done' && !queueIds.includes(t.id));
+          const todayTasks = tasks.filter(t => !t.isDaily && isToday(t.startTime) && t.status !== 'done' && !queueIds.includes(t.id));
+          const otherTasks = tasks.filter(t => !t.isDaily && !isToday(t.startTime) && t.status !== 'done' && !queueIds.includes(t.id));
+
+          const formatTime = (s) => `${Math.floor(s / 60).toString().padStart(2,'0')}:${(s % 60).toString().padStart(2,'0')}`;
+
+          return (
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-[calc(100vh-140px)]">
+              <div className="lg:col-span-7 flex flex-col gap-6 h-full">
+                <Card className="flex flex-col flex-1 relative overflow-hidden transition-all bg-white border-slate-200">
+                  <div className="p-6 flex justify-between items-center z-10">
+                     <div className="flex gap-2">
+                       {['focus', 'short', 'long'].map(m => (
+                           <button key={m} onClick={() => { setMode(m); setIsActive(false); }} className={`px-3 py-1.5 rounded-lg text-sm font-medium border capitalize ${mode === m ? 'bg-indigo-50 border-indigo-200 text-indigo-700' : 'border-transparent text-slate-500'}`}>{m}</button>
+                       ))}
+                     </div>
+                     <button onClick={() => setShowSettings(!showSettings)} className="p-2 text-slate-400 hover:text-indigo-600"><Settings size={20} /></button>
+                  </div>
+
+                  {showSettings && (
+                     <div className="absolute inset-0 bg-white/95 backdrop-blur z-20 flex items-center justify-center p-8 animate-in fade-in">
+                        <div className="w-full max-w-xs space-y-4">
+                           <h3 className="font-bold text-slate-800 text-center">Settings</h3>
+                           {Object.keys(settings).map(k => (
+                               <div key={k}><label className="text-xs uppercase text-slate-500">{k}</label><input type="number" value={settings[k]} onChange={e => setSettings({...settings, [k]: +e.target.value})} className="w-full p-2 border rounded" /></div>
+                           ))}
+                           <Button onClick={() => setShowSettings(false)} className="w-full mt-4">Close</Button>
+                        </div>
+                     </div>
+                  )}
+                  
+                  <div className="flex-1 flex flex-col items-center justify-center relative z-10 mb-8">
+                     <div className="text-9xl font-bold font-mono tracking-tighter mb-8 tabular-nums text-slate-800">
+                        {formatTime(timeLeft)}
+                     </div>
+                     <div className="flex items-center gap-4">
+                        <button onClick={toggleTimer} className={`w-20 h-20 rounded-full flex items-center justify-center text-white shadow-xl transition-all active:scale-95 ${isActive ? 'bg-amber-500' : 'bg-slate-900'}`}>
+                            {isActive ? <Pause size={32} fill="currentColor" /> : <Play size={32} fill="currentColor" className="ml-1" />}
+                        </button>
+                        <button onClick={resetTimer} className="w-12 h-12 rounded-full bg-slate-100 text-slate-500 hover:bg-slate-200 flex items-center justify-center"><RotateCcw size={20} /></button>
+                     </div>
+                     {mode === 'focus' && isActive && (
+                       <div className="mt-8 px-4 py-2 bg-indigo-50 text-indigo-700 rounded-full text-sm font-medium border border-indigo-100 flex items-center gap-2 max-w-md text-center animate-pulse">
+                         {activeQueueTask ? `🚀 Mission: ${activeQueueTask.title}` : "Waiting for tasks..."}
+                       </div>
+                     )}
+                  </div>
+                  
+                  <RocketRunner isRunning={isActive && mode === 'focus'} />
+                </Card>
+              </div>
+
+              <div className="lg:col-span-5 flex flex-col gap-4 h-full overflow-hidden">
+                 {/* Очередь сессии */}
+                 <Card className="flex-1 flex flex-col overflow-hidden bg-slate-50/50 border-dashed border-2">
+                    <div className="p-4 border-b bg-white flex justify-between items-center" onDragOver={e=>e.preventDefault()} onDrop={handleDropToSession}>
+                        <h3 className="font-bold text-slate-700 flex gap-2"><Zap className="text-amber-500" size={18}/> Session Queue</h3>
+                        <span className="text-xs font-bold bg-slate-100 px-2 py-1 rounded">{sessionTasks.length}</span>
+                    </div>
+                    <div className="p-3 flex-1 overflow-y-auto space-y-2 relative">
+                        {sessionTasks.length === 0 && <div className="absolute inset-0 flex items-center justify-center text-slate-400 text-sm">Drag tasks here</div>}
+                        {sessionTasks.map((t, i) => {
+                            const isTaskActive = activeQueueTask && activeQueueTask.id === t.id;
+                            const isTimerRunning = isActive && mode === 'focus';
+                            return (
+                                <div key={t.id} draggable onDragStart={e => handleDragStartQueue(e, i)} onDragOver={e=>e.preventDefault()} onDrop={e => handleDropOnItem(e, i)} 
+                                     className={`p-3 rounded-lg border bg-white cursor-grab active:cursor-grabbing relative group ${isTaskActive && isTimerRunning ? 'border-indigo-400 ring-2 ring-indigo-100 animate-pulse-ring' : 'hover:border-blue-300'}`}>
+                                    <div className="flex justify-between items-center mb-2">
+                                        <div className="flex items-center gap-2 text-sm font-medium truncate w-4/5">
+                                            {isTaskActive && isTimerRunning && <Loader2 size={12} className="text-indigo-500 animate-spin"/>}
+                                            {t.title}
+                                        </div>
+                                        <button onClick={()=>removeFromSession(t.id)} className="text-slate-300 hover:text-red-500"><X size={14}/></button>
+                                    </div>
+                                    
+                                    <div className="flex justify-between text-xs text-slate-500 mb-1">
+                                        <span className={isTaskActive ? "font-bold text-indigo-600" : ""}>
+                                            {isTaskActive ? formatDurationDetailed(t.duration) : Math.ceil(t.duration) + 'm'} left
+                                        </span>
+                                        <span>{t.totalDuration || Math.ceil(t.duration)}m total</span>
+                                    </div>
+                                    <ProgressBar current={t.duration} total={t.totalDuration || t.duration} colorClass={isTaskActive ? 'bg-indigo-500' : 'bg-blue-500'} />
+                                </div>
+                            );
+                        })}
+                    </div>
+                 </Card>
+                 
+                 {/* Доступные задачи */}
+                 <Card className="flex-1 flex flex-col overflow-hidden">
+                     <div className="p-3 border-b bg-slate-50 text-xs font-bold text-slate-500 uppercase">Available Tasks</div>
+                     <div className="p-2 flex-1 overflow-y-auto custom-scrollbar space-y-4">
+                         {[
+                             { title: 'Daily', tasks: dailyTasks, icon: Repeat, color: 'text-slate-500' },
+                             { title: 'Today', tasks: todayTasks, icon: CalendarDays, color: 'text-blue-500' },
+                             { title: 'Backlog', tasks: otherTasks, icon: Circle, color: 'text-slate-400' }
+                         ].map(group => group.tasks.length > 0 && (
+                             <div key={group.title}>
+                                 <div className={`text-[10px] font-bold uppercase tracking-wider mb-2 ml-2 flex items-center gap-1 ${group.color}`}>
+                                     <group.icon size={10} /> {group.title}
+                                 </div>
+                                 <div className="space-y-1">
+                                     {group.tasks.map(t => (
+                                         <div key={t.id} draggable onDragStart={e => e.dataTransfer.setData('taskId', t.id)} className="flex items-center justify-between p-2 hover:bg-slate-50 rounded border border-transparent hover:border-slate-200 cursor-move">
+                                             <div className="flex items-center gap-2 overflow-hidden">
+                                                 <div className={`w-2 h-2 rounded-full flex-shrink-0 ${t.priority === 'high' ? 'bg-red-400' : 'bg-slate-300'}`} />
+                                                 <span className="text-sm truncate">{t.title}</span>
+                                             </div>
+                                             <div className="flex items-center gap-2">
+                                                 <span className="text-xs text-slate-400">{Math.ceil(t.duration)}m</span>
+                                                 <button onClick={() => addToSession(t)} className="text-blue-600 hover:bg-blue-50 p-1 rounded"><Plus size={14} /></button>
+                                             </div>
+                                         </div>
+                                     ))}
+                                 </div>
+                             </div>
+                         ))}
+                         {!dailyTasks.length && !todayTasks.length && !otherTasks.length && <div className="text-center p-4 text-xs text-slate-400">No available tasks</div>}
+                     </div>
+                 </Card>
+              </div>
+            </div>
+          );
+        }
+
+        function BoardView({ tasks, onMoveStatus, onEdit }) {
+          const columns = [
+            { id: 'todo', title: 'К выполнению', color: 'bg-slate-100', icon: Circle },
+            { id: 'in-progress', title: 'В работе', color: 'bg-blue-50', icon: Clock },
+            { id: 'done', title: 'Готово', color: 'bg-emerald-50', icon: CheckCircle2 },
+          ];
+
+          const currentSprintTasks = tasks.filter(t => t.sprint === 'current');
+
+          const handleDragStart = (e, taskId) => {
+            e.dataTransfer.setData('taskId', taskId);
+          };
+
+          const handleDragOver = (e) => {
+            e.preventDefault();
+          };
+
+          const handleDrop = (e, status) => {
+            const taskId = e.dataTransfer.getData('taskId');
+            if (taskId) onMoveStatus(taskId, status);
+          };
+
+          return (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 h-[calc(100vh-140px)]">
+              {columns.map(col => (
+                <div 
+                  key={col.id}
+                  className={`rounded-xl flex flex-col h-full ${col.color} border border-slate-200/50`}
+                  onDragOver={handleDragOver}
+                  onDrop={(e) => handleDrop(e, col.id)}
+                >
+                  <div className="p-4 flex items-center justify-between border-b border-slate-200/50 bg-white/50 rounded-t-xl backdrop-blur-sm">
+                    <div className="flex items-center gap-2 font-semibold text-slate-700">
+                      <col.icon size={18} className={col.id === 'done' ? 'text-emerald-500' : col.id === 'in-progress' ? 'text-blue-500' : 'text-slate-400'} />
+                      {col.title}
+                    </div>
+                    <span className="bg-white px-2 py-0.5 rounded-md text-xs font-bold text-slate-500 border border-slate-200">
+                      {currentSprintTasks.filter(t => t.status === col.id).length}
+                    </span>
+                  </div>
+
+                  <div className="p-3 flex-1 overflow-y-auto space-y-3 custom-scrollbar">
+                    {currentSprintTasks
+                      .filter(t => t.status === col.id)
+                      .map(task => (
+                        <div
+                          key={task.id}
+                          draggable
+                          onDragStart={(e) => handleDragStart(e, task.id)}
+                          onClick={() => onEdit(task)}
+                          className="bg-white p-4 rounded-lg shadow-sm border border-slate-200 hover:shadow-md hover:border-blue-300 transition-all cursor-grab active:cursor-grabbing group"
+                        >
+                          <div className="flex justify-between items-start mb-2">
+                            <h3 className="font-medium text-slate-800 leading-snug">{task.title}</h3>
+                            {task.priority === 'high' && <div className="w-2 h-2 rounded-full bg-red-500 mt-1.5" title="Высокий приоритет" />}
+                          </div>
+                          
+                          <div className="flex items-center justify-between text-xs text-slate-500 mt-3 mb-2">
+                            <div className="flex items-center gap-3">
+                               <span className="flex items-center gap-1 bg-slate-50 px-1.5 py-0.5 rounded border border-slate-100">
+                                 <Clock size={12} />
+                                 {Math.ceil(task.duration)}м
+                               </span>
+                               {task.link && <LinkIcon size={12} className="text-blue-400" />}
+                            </div>
+                            {task.isDaily && <Repeat size={12} className="text-slate-400" />}
+                          </div>
+                          
+                          <ProgressBar current={task.duration} total={task.totalDuration || task.duration} />
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        }
+
+        function CalendarView({ tasks, onUpdateTask, onEdit }) {
+          const weekDays = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+          const startHour = 8;
+          const endHour = 20;
+          const hours = Array.from({ length: endHour - startHour + 1 }, (_, i) => startHour + i);
+          
+          const today = new Date();
+          const currentDay = today.getDay(); 
+          const mondayOffset = currentDay === 0 ? -6 : 1 - currentDay; 
+          const mondayDate = new Date(today);
+          mondayDate.setDate(today.getDate() + mondayOffset);
+
+          const weekDates = weekDays.map((_, i) => {
+            const d = new Date(mondayDate);
+            d.setDate(mondayDate.getDate() + i);
+            return d;
+          });
+
+          const [resizing, setResizing] = useState(null);
+
+          useEffect(() => {
+            const handleMouseMove = (e) => {
+                if (!resizing) return;
+                const deltaY = e.clientY - resizing.startY;
+                const deltaMinutes = (deltaY / 64) * 60;
+                const newDuration = Math.max(15, resizing.startDuration + deltaMinutes);
+                setResizing(prev => ({ ...prev, currentDuration: newDuration }));
+            };
+
+            const handleMouseUp = () => {
+                if (!resizing) return;
+                if (resizing.currentDuration !== resizing.startDuration) {
+                     onUpdateTask({ ...resizing.task, duration: Math.round(resizing.currentDuration) });
+                }
+                setResizing(null);
+            };
+
+            if (resizing) {
+                window.addEventListener('mousemove', handleMouseMove);
+                window.addEventListener('mouseup', handleMouseUp);
+            }
+            return () => {
+                window.removeEventListener('mousemove', handleMouseMove);
+                window.removeEventListener('mouseup', handleMouseUp);
+            };
+          }, [resizing, onUpdateTask]);
+
+          const getTaskPosition = (task, displayDuration) => {
+            if (!task.startTime) return null;
+            const date = new Date(task.startTime);
+            const taskTime = date.getTime();
+            const weekStart = weekDates[0].setHours(0,0,0,0);
+            const weekEnd = weekDates[6].setHours(23,59,59,999);
+            
+            if (taskTime < weekStart || taskTime > weekEnd) return null;
+
+            const dayIndex = (date.getDay() + 6) % 7;
+            const hour = date.getHours();
+            const minutes = date.getMinutes();
+            
+            const startOffsetMinutes = (startHour * 60);
+            const taskStartMinutes = (hour * 60) + minutes;
+            const top = ((taskStartMinutes - startOffsetMinutes) / 60) * 64; 
+            const height = (displayDuration / 60) * 64;
+
+            return { dayIndex, top, height };
+          };
+
+          const handleDropOnDay = (e, dayDate) => {
+            e.preventDefault();
+            try {
+                const taskData = JSON.parse(e.dataTransfer.getData('taskJson'));
+                const rect = e.currentTarget.getBoundingClientRect();
+                const y = e.clientY - rect.top;
+                const hourOffset = Math.floor(y / 64);
+                const minutesOffset = Math.floor((y % 64) / 64 * 60);
+                
+                const newDate = new Date(dayDate);
+                newDate.setHours(startHour + hourOffset, minutesOffset);
+                
+                onUpdateTask({ ...taskData, startTime: newDate.toISOString() });
+            } catch(err) {
+                console.error("Drop error", err);
+            }
+          };
+
+          const handleResizeStart = (e, task) => {
+            e.stopPropagation();
+            e.preventDefault();
+            setResizing({
+                id: task.id,
+                task: task,
+                startY: e.clientY,
+                startDuration: task.duration,
+                currentDuration: task.duration
+            });
+          };
+
+          return (
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-140px)]">
+                <div className="flex border-b border-slate-200 bg-slate-50">
+                    <div className="w-16 flex-shrink-0 border-r border-slate-200 p-2 text-center text-xs text-slate-400 font-medium">GMT+3</div>
+                    {weekDates.map((date, i) => (
+                        <div key={i} className="flex-1 p-3 text-center border-r border-slate-100 last:border-r-0">
+                            <div className="text-xs text-slate-500 font-medium uppercase tracking-wide">{weekDays[i]}</div>
+                            <div className={`text-lg font-bold ${isToday(date.toISOString()) ? 'text-blue-600 bg-blue-50 w-8 h-8 rounded-full flex items-center justify-center mx-auto' : 'text-slate-800'}`}>
+                                {date.getDate()}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="overflow-y-auto flex-1 custom-scrollbar relative">
+                     <div className="flex relative min-h-[800px]">
+                        <div className="w-16 flex-shrink-0 border-r border-slate-200 bg-white z-10 sticky left-0">
+                            {hours.map(h => (
+                                <div key={h} className="h-16 border-b border-slate-100 text-xs text-slate-400 text-right pr-2 pt-1">
+                                    {h}:00
+                                </div>
+                            ))}
+                        </div>
+
+                        {weekDates.map((date, i) => (
+                            <div key={i} className="flex-1 border-r border-slate-100 last:border-r-0 relative group"
+                                onDragOver={(e) => e.preventDefault()}
+                                onDrop={(e) => handleDropOnDay(e, date)}>
+                                {hours.map(h => (<div key={h} className="h-16 border-b border-slate-50"></div>))}
+                                
+                                {tasks.map(task => {
+                                    const displayDuration = resizing?.id === task.id ? resizing.currentDuration : task.duration;
+                                    const pos = getTaskPosition(task, displayDuration);
+                                    if (!pos || pos.dayIndex !== i) return null;
+                                    
+                                    return (
+                                        <div key={task.id} draggable
+                                            onDragStart={(e) => { e.dataTransfer.setData('taskJson', JSON.stringify(task)); }}
+                                            onClick={(e) => { e.stopPropagation(); onEdit(task); }}
+                                            style={{ 
+                                                top: `${pos.top}px`, 
+                                                height: `${Math.max(pos.height, 32)}px`,
+                                                left: '4px', right: '4px'
+                                            }}
+                                            className={`absolute rounded-md p-2 text-xs border cursor-pointer hover:z-10 transition-all shadow-sm select-none overflow-hidden flex flex-col justify-between
+                                                ${task.status === 'done' ? 'bg-emerald-100 border-emerald-200 text-emerald-900 opacity-60' : task.status === 'in-progress' ? 'bg-blue-100 border-blue-200 text-blue-900' : 'bg-amber-100 border-amber-200 text-amber-900'}`}>
+                                            <div className="font-semibold truncate flex items-center gap-1">{task.title} {task.isDaily && <Repeat size={10} />}</div>
+                                            <div className="opacity-75">{Math.ceil(displayDuration)} / {task.totalDuration || Math.ceil(task.duration)} мин</div>
+                                            <div className="w-full h-1 bg-black/10 rounded-full mt-1">
+                                                <div className="h-full bg-black/30 rounded-full" style={{ width: `${Math.min(100, (( (task.totalDuration || task.duration) - task.duration) / (task.totalDuration || task.duration)) * 100)}%` }} />
+                                            </div>
+                                            <div 
+                                                className="absolute bottom-0 left-0 w-full h-3 cursor-ns-resize hover:bg-black/10 rounded-b-md z-10"
+                                                onMouseDown={(e) => handleResizeStart(e, task)}
+                                            />
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        ))}
+                        <div className="absolute left-16 right-0 border-t-2 border-red-400 z-0 pointer-events-none opacity-50" style={{ top: '220px' }}>
+                            <div className="absolute -left-2 -top-1.5 w-3 h-3 bg-red-400 rounded-full" />
+                        </div>
+                     </div>
+                </div>
+            </div>
+          );
+        }
+
+        function AnalyticsView({ tasks, archives }) {
+          const totalArchivedTime = archives.reduce((acc, a) => acc + (a.totalDuration || 0), 0);
+          const totalArchivedCount = archives.reduce((acc, a) => acc + (a.count || 0), 0);
+          const liveDoneCount = tasks.filter(t => t.status === 'done').length;
+          const liveTime = tasks.reduce((acc, t) => acc + (t.status === 'in-progress' || t.status === 'done' ? (t.totalDuration - t.duration) : 0), 0);
+
+          const data = [
+              { name: 'Live', tasks: liveDoneCount, time: Math.round(liveTime) },
+              { name: 'Archived', tasks: totalArchivedCount, time: Math.round(totalArchivedTime) }
+          ];
+
+          return (
+              <div className="space-y-6">
+                  <div className="grid grid-cols-3 gap-6">
+                     <Card className="p-6">
+                         <div className="text-slate-500 text-sm">Total Tasks Completed</div>
+                         <div className="text-3xl font-bold text-slate-800">{liveDoneCount + totalArchivedCount}</div>
+                         <div className="text-xs text-slate-400 mt-1">{totalArchivedCount} in archive</div>
+                     </Card>
+                     <Card className="p-6">
+                         <div className="text-slate-500 text-sm">Total Focus Time (min)</div>
+                         <div className="text-3xl font-bold text-blue-600">{Math.round(liveTime + totalArchivedTime)}</div>
+                     </Card>
+                     <Card className="p-6">
+                         <div className="text-slate-500 text-sm">Archives Count</div>
+                         <div className="text-3xl font-bold text-amber-600">{archives.length}</div>
+                     </Card>
+                  </div>
+                  <Card className="p-6 h-80">
+                      <h3 className="font-bold mb-4">Performance Overview</h3>
+                      <ResponsiveContainer width="100%" height="100%">
+                          <BarChart data={data}>
+                              <CartesianGrid strokeDasharray="3 3" />
+                              <XAxis dataKey="name" />
+                              <YAxis />
+                              <Tooltip />
+                              <Legend />
+                              <Bar dataKey="tasks" fill="#8884d8" name="Tasks Count" />
+                              <Bar dataKey="time" fill="#82ca9d" name="Minutes Spent" />
+                          </BarChart>
+                      </ResponsiveContainer>
+                  </Card>
+              </div>
+          );
+        }
+
+        function TaskModal({ task, onSave, onClose, onDelete }) {
+          const [formData, setFormData] = useState({
+            title: '', 
+            status: 'todo', 
+            priority: 'medium', 
+            duration: 60, 
+            totalDuration: 60, 
+            link: '', 
+            description: '', 
+            isDaily: false,
+            ...task, 
+            startTime: task?.startTime ? new Date(task.startTime).toISOString().slice(0, 16) : ''
+          });
+
+          const handleChange = (e) => {
+            const { name, value, type, checked } = e.target;
+            setFormData(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
+          };
+
+          const handleSubmit = (e) => {
+            e.preventDefault();
+            onSave({
+                ...formData,
+                totalDuration: !task ? formData.duration : formData.totalDuration,
+                startTime: formData.startTime ? new Date(formData.startTime).toISOString() : null
+            });
+          };
+
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+              <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden animate-in fade-in zoom-in duration-200">
+                <form onSubmit={handleSubmit}>
+                    <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+                        <h2 className="text-lg font-bold text-slate-800">
+                            {task ? 'Редактировать задачу' : 'Новая задача'}
+                        </h2>
+                        <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600">
+                            <X size={20} />
+                        </button>
+                    </div>
+                    
+                    <div className="p-6 space-y-4">
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">Название задачи</label>
+                            <input 
+                                required
+                                type="text" 
+                                name="title"
+                                value={formData.title} 
+                                onChange={handleChange}
+                                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none transition-all"
+                                placeholder="Например: Сделать рефакторинг..."
+                            />
+                        </div>
+
+                        <div className="flex items-center gap-2 bg-slate-50 p-2 rounded-lg border border-slate-100">
+                            <input 
+                                type="checkbox"
+                                name="isDaily"
+                                id="isDaily"
+                                checked={formData.isDaily}
+                                onChange={handleChange}
+                                className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                            />
+                            <label htmlFor="isDaily" className="text-sm font-medium text-slate-700 select-none flex items-center gap-1 cursor-pointer">
+                                <Repeat size={14} className="text-slate-500" /> Ежедневная задача (повторяется каждый день)
+                            </label>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700 mb-1">Статус</label>
+                                <select 
+                                    name="status" 
+                                    value={formData.status} 
+                                    onChange={handleChange}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500"
+                                >
+                                    <option value="todo">К выполнению</option>
+                                    <option value="in-progress">В работе</option>
+                                    <option value="done">Готово</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700 mb-1">Приоритет</label>
+                                <select 
+                                    name="priority" 
+                                    value={formData.priority} 
+                                    onChange={handleChange}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500"
+                                >
+                                    <option value="low">Низкий</option>
+                                    <option value="medium">Средний</option>
+                                    <option value="high">Высокий</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                             <div>
+                                <label className="block text-sm font-medium text-slate-700 mb-1">Время (минуты)</label>
+                                <input 
+                                    type="number" 
+                                    name="duration"
+                                    value={formData.duration} 
+                                    onChange={handleChange}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                            </div>
+                            <div>
+                                 <label className="block text-sm font-medium text-slate-700 mb-1">Начало (Дата/Время)</label>
+                                 <input 
+                                    type="datetime-local" 
+                                    name="startTime"
+                                    value={formData.startTime} 
+                                    onChange={handleChange}
+                                    disabled={formData.isDaily}
+                                    className="w-full px-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500 text-sm disabled:opacity-50 disabled:bg-slate-100"
+                                />
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-slate-700 mb-1">Ссылка на источник</label>
+                            <div className="relative">
+                                <LinkIcon className="absolute left-3 top-2.5 text-slate-400" size={16} />
+                                <input 
+                                    type="url" 
+                                    name="link"
+                                    value={formData.link} 
+                                    onChange={handleChange}
+                                    className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-indigo-500"
+                                    placeholder="https://..."
+                                />
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="px-6 py-4 bg-slate-50 border-t border-slate-100 flex justify-between">
+                        {task ? (
+                            <button 
+                                type="button" 
+                                onClick={() => onDelete(task.id)}
+                                className="text-red-600 hover:text-red-700 text-sm font-medium px-3 py-2 rounded hover:bg-red-50 flex items-center gap-1"
+                            >
+                                <Trash2 size={16} /> Удалить
+                            </button>
+                        ) : <div />}
+                        
+                        <div className="flex gap-3">
+                            <Button variant="secondary" onClick={onClose} type="button">Отмена</Button>
+                            <Button variant="primary" type="submit">Сохранить</Button>
+                        </div>
+                    </div>
+                </form>
+              </div>
+            </div>
+          );
+        }
+
+        const root = createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
